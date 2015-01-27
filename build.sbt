@@ -5,6 +5,8 @@ scalaVersion :="2.10.4"
 
 autoScalaLibrary := false
 
+mainClass in assembly := Some("edu.ucsc.FauxShift")
+
 version :="1.0"
 
 resolvers ++= Seq(
@@ -20,3 +22,19 @@ libraryDependencies ++= Seq(
     "org.scala-lang" % "scala-library" % scalaVersion.value,
     "org.scala-lang" % "scala-compiler" % scalaVersion.value
 )
+
+
+mergeStrategy in assembly <<= (mergeStrategy in assembly) { (old) =>
+  {
+    case PathList("com", "esotericsoftware", xs @ _*) => MergeStrategy.first
+    case PathList("javax", "servlet", xs @ _*) => MergeStrategy.first
+    case PathList("org", "w3c", xs @ _*) => MergeStrategy.first
+    case "about.html"     => MergeStrategy.discard
+    case "reference.conf" => MergeStrategy.concat
+    case "log4j.properties"     => MergeStrategy.concat
+    case PathList("META-INF", "mailcap") => MergeStrategy.discard
+    case PathList("META-INF", "MANIFEST.MF") => MergeStrategy.discard
+    case PathList("META-INF", xs @ _*) => MergeStrategy.discard
+    case x => MergeStrategy.first
+  }
+}

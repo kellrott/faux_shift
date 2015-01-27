@@ -1,5 +1,7 @@
 package edu.ucsc
 
+import com.esotericsoftware.kryo.Kryo
+import org.apache.spark.serializer.KryoRegistrator
 import org.saddle.scalar.NA
 import org.saddle.{Vec, Series, Index}
 import org.saddle.io._
@@ -11,6 +13,10 @@ import scala.collection.JavaConverters._
 import org.rogach.scallop
 import org.apache.spark.SparkContext
 import org.apache.spark.SparkConf
+import scala.collection.mutable
+import scala.util.parsing.json.{JSONArray, JSONObject}
+
+import scala.reflect.io.File
 
 class ShiftVertex(val name : String,
                   val nodeType : String,
@@ -37,27 +43,45 @@ class ShiftVertex(val name : String,
     println(messages)
     val results = knockouts.map( exp => {
       // -a> or -a| edge types
-      val activation_value = Option(Vec( messages.filter( x => x.edgeType == "-a>" || x.edgeType == "-a|" ).
+      val activation_value_pos = Option(Vec( messages.filter( x => x.edgeType == "-a>" ).
         map( x => x.values.get(exp) ).filter(!_.isNA).map(_.get): _* ).mean)
 
+      val activation_value_neg = Option(Vec( messages.filter( x => x.edgeType == "-a|" ).
+        map( x => x.values.get(exp) ).filter(!_.isNA).map(-_.get): _* ).mean)
+
       // -t> or -t| edge types
-      val transcription_value = Option(Vec( messages.filter( x => x.edgeType == "-t>" || x.edgeType == "-t|" ).
+      val transcription_value_pos = Option(Vec( messages.filter( x => x.edgeType == "-t>").
         map( x => x.values.get(exp) ).filter(!_.isNA).map(_.get): _*).mean)
+
+      // -t> or -t| edge types
+      val transcription_value_neg = Option(Vec( messages.filter( x => x.edgeType == "-t|" ).
+        map( x => x.values.get(exp) ).filter(!_.isNA).map( -_.get): _*).mean)
 
       // -component> edge types
       val component_value = Vec( messages.filter( x => x.edgeType == "-component>" ).
+        filter(_.downStream).
         map( x => x.values.get(exp) ).filter(!_.isNA).map(_.get): _*).max
 
       // -member> edge types
       val member_value = Vec( messages.filter( x => x.edgeType == "-member>" ).
+        filter(_.downStream).
         map( x => x.values.get(exp) ).filter(!_.isNA).map(_.get):_* ).min
 
-      val input_value = if (exp_input.contains(exp._1))
+      /*
+      val input_value = if (exp_input.contains(exp._1) && !exp_input.get(exp._1).isNA)
         Option(exp_input.get(exp._1).get)
       else
         None
+      */
+      val prev_val = if (levels.contains(exp)) {
+        Option(levels.get(exp).get)
+      } else {
+        None
+      }
 
-      val inputs = Array(Option(1.0), activation_value, transcription_value, component_value, member_value, input_value)
+      val inputs = Array(activation_value_pos, activation_value_neg,
+        transcription_value_pos, transcription_value_neg,
+        component_value, member_value, prev_val)
       //println(name, inputs.mkString(" , "))
       Vec(inputs.filter(x => x.isDefined).map(_.get)).mean
     }).toVec
@@ -69,6 +93,57 @@ class ShiftVertex(val name : String,
     return out
   }
 
+  def toJSON(): String = {
+
+    //levels.toSeq.map( x => x._1._1 ).toSet.map( x => levels.toSeq.filter( _._1 == x).map( y => y._) )
+    val up_exp = new mutable.HashMap[String,mutable.HashMap[String,Double]]()
+    val down_exp = new mutable.HashMap[String,mutable.HashMap[String,Double]]()
+
+    levels.toSeq.foreach( x => {
+      if (x._1._3) {
+        if (!down_exp.contains(x._1._1)) {
+          down_exp(x._1._1) = new mutable.HashMap[String,Double]()
+        }
+        down_exp(x._1._1)(x._1._2) = x._2
+      } else {
+        if (!up_exp.contains(x._1._1)) {
+          up_exp(x._1._1) = new mutable.HashMap[String,Double]()
+        }
+        up_exp(x._1._1)(x._1._2) = x._2
+      }
+    })
+
+    val shift = new mutable.HashMap[String,Map[String,Double]]()
+    up_exp.foreach( x => {
+      shift(x._1) = x._2.keys.filter( y => (up_exp(x._1).contains(y)) && (down_exp(x._1).contains(y)) ).map( y => (y, up_exp(x._1)(y) - down_exp(x._1)(y)) ).toMap
+    } )
+
+
+    /*
+    val exp = levels.toSeq.map( x => JSONObject(
+      Map(
+        "sample" -> x._1._1,
+        "gene_test" -> x._1._2,
+        "downstream" -> x._1._3,
+        "value" -> x._2
+      ))
+    ).toList
+    */
+
+    val v = new JSONObject(
+      Map(
+        "gene" -> name,
+        "exp_inputs" -> JSONObject( exp_input.toSeq.toMap ),
+        "experiments" -> JSONObject( Map(
+          "downstream" -> JSONObject( down_exp.map( x=> (x._1, JSONObject(x._2.toMap)) ).toMap ),
+          "upstream" -> JSONObject( up_exp.map( x => (x._1, JSONObject(x._2.toMap))).toMap ) )
+        ),
+        "shift" -> JSONObject( shift.map( x => (x._1, JSONObject(x._2)) ).toMap )
+      )
+    )
+    v.toString()
+  }
+
 }
 
 class ShiftMessage(val edgeType: String, val downStream: Boolean, val values: Series[(String,String,Boolean),Double]) extends Serializable {
@@ -77,6 +152,15 @@ class ShiftMessage(val edgeType: String, val downStream: Boolean, val values: Se
     "ShiftMessage<%s:%s=%s>".format(edgeType,downStream,values)
   }
 }
+
+
+class ShiftRegistrator extends KryoRegistrator {
+  override def registerClasses(kryo: Kryo) {
+    kryo.register(classOf[ShiftMessage])
+    kryo.register(classOf[ShiftVertex])
+  }
+}
+
 
 object FauxShift {
 
@@ -91,17 +175,25 @@ object FauxShift {
       val mutations: scallop.ScallopOption[String] = opt[String]("mut")
       val expression: scallop.ScallopOption[String] = opt[String]("exp")
       val cycle_count: scallop.ScallopOption[Int] = opt[Int]("cycles", default=Option(10))
-      val sample: scallop.ScallopOption[String] = opt[String]("sample")
+      val frags: scallop.ScallopOption[Int] = opt[Int]("frags", default=Option(20))
       val gene: scallop.ScallopOption[String] = opt[String]("gene")
+      val outdir: scallop.ScallopOption[String] = opt[String]("outdir")
+      val sample: scallop.ScallopOption[List[String]] = opt[List[String]]("sample")
     }
 
     val sconf = new SparkConf().setMaster(cmdline.spark()).setAppName("ShiftTest")
     sconf.set("spark.serializer.objectStreamReset", "1000")
+    sconf.set("spark.serializer", "org.apache.spark.serializer.KryoSerializer")
+    sconf.set("spark.kryo.registrator", "edu.ucsc.ShiftRegistrator")
+
     val sc = new SparkContext(sconf)
     val (vertices, edges) = SPFReader.read(cmdline.spf())
-    val vertex_rdd = sc.parallelize(vertices, 20)
-    val edge_rdd = sc.parallelize(edges.map(x => Edge(x._1, x._2, x._3)), 20)
+    val vertex_rdd = sc.parallelize(vertices, cmdline.frags())
+    val edge_rdd = sc.parallelize(edges.map(x => Edge(x._1, x._2, x._3)), cmdline.frags())
     val graph = Graph(vertex_rdd, edge_rdd)
+
+    val outdir = File(cmdline.outdir())
+    if (!outdir.exists) outdir.createDirectory()
 
     //open the TSV
     val exp_file = CsvFile(cmdline.expression())
@@ -112,7 +204,8 @@ object FauxShift {
 
     if (cmdline.sample.isDefined) {
       //if we are only looking at a single sample, we can remove all other columns
-      exp_frame = exp_frame.colSliceBy(cmdline.sample(),cmdline.sample())
+      exp_frame = exp_frame.filterIx( x => cmdline.sample().contains(x) )
+      //exp_frame = exp_frame.colSliceBy(cmdline.sample(),cmdline.sample())
     }
 
     //true is downstream, false is upstream
@@ -131,7 +224,7 @@ object FauxShift {
     val experimentSet_br = sc.broadcast(experimentSet)
 
     //parallelize the matrix by the genes (rows) so the data can be attached to the graph
-    val exp_rdd = sc.parallelize(exp_frame.toRowSeq, 20)
+    val exp_rdd = sc.parallelize(exp_frame.toRowSeq, cmdline.frags())
     //join the columns to the graph vertices by the vertex names
     val exp_rdd_joined = vertex_rdd.map(x => (x._2.name, x)).join(exp_rdd).map(
       //create new vertex values, which are ShiftVertex structures
@@ -147,7 +240,9 @@ object FauxShift {
     //data_graph.vertices.map( x=> x._2.name + "\t" + x._2.exp_input).saveAsTextFile("exp.dump")
     data_graph = data_graph.mapVertices( (x,y) => y.init(0.5, experimentSet_br.value) )
     //data_graph.vertices.map( x=> x._2.name + "\t" + x._2.levels.toSeq.map( y => "%s:%s=%s".format(y._1._1, y._1._2, y._2) ).mkString("\t") ).saveAsTextFile("cycle." + 0 + ".dump")
-    data_graph.vertices.map( x=> x._2.name + "\t" + x._2.levels.toSeq.map( y => "%s:%s:%s=%s".format(y._1._1, y._1._2, y._1._3, y._2) ).mkString("\t") ).saveAsTextFile("start.dump")
+    //println("Saving: ", (outdir / "start.dump").toString() )
+    //data_graph.vertices.
+    //  map( x=> x._2.toJSON() ).saveAsTextFile( (outdir / "start.dump").toString() )
 
     for (i <- 1 to cmdline.cycle_count()) {
       val messages = data_graph.aggregateMessages[List[ShiftMessage]](x => {
@@ -159,7 +254,7 @@ object FauxShift {
           //downstream messages
           val downstream = x.srcAttr.levels.filterIx(y => {
             //either the downstream target isn't part of the knockout experiment, or it isn't a downstream experiment
-            y._1 != x.dstAttr.name || y._2 == UPSTREAM
+            y._2 != x.dstAttr.name || y._3 == UPSTREAM
           })
           x.sendToDst(List(new ShiftMessage(x.attr.edgeType, DOWNSTREAM, downstream)))
         }
@@ -167,7 +262,7 @@ object FauxShift {
           //upstream messages
           val upstream = x.dstAttr.levels.filterIx(y => {
             //either the downstream target isn't part of the knockout experiment, or it isn't a downstream experiment
-            y._1 != x.srcAttr.name || y._2 == DOWNSTREAM
+            y._2 != x.srcAttr.name || y._3 == DOWNSTREAM
           })
           x.sendToSrc(List(new ShiftMessage(x.attr.edgeType, UPSTREAM, upstream)))
         }
@@ -179,12 +274,16 @@ object FauxShift {
       )
       val next = data_graph.outerJoinVertices(messages)((vid, vertex, messages) => vertex.process(messages.getOrElse(List[ShiftMessage]()) ))
       data_graph = next
-      data_graph.vertices.map( x=> x._2.name + "\t" + x._2.levels.toSeq.map( y => "%s:%s:%s=%s".format(y._1._1, y._1._2, y._1._3, y._2) ).mkString("\t") ).saveAsTextFile("cycle." + i + ".dump")
+      if (i % 10 == 0) {
+        data_graph.vertices.
+          map(x => x._2.toJSON()).
+          saveAsTextFile((outdir / ("cycle." + i + ".dump")).toString())
+      }
     }
 
-    //val out_data = data_graph.vertices.map( x=> (x._2.name, x._2.levels) )
-    //println(out_data.collect.mkString("\n"))
-
+    data_graph.vertices.
+      map(x => x._2.toJSON()).
+      saveAsTextFile((outdir / ("final.dump")).toString())
   }
 
 }
