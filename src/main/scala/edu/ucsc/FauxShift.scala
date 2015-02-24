@@ -23,52 +23,53 @@ import scala.reflect.io.File
 
 class ShiftVertex(val name : String,
                   val nodeType : String,
-                  val exp_input: Series[String,Double]
+                  val exp_input: Map[String,Double]
                    ) extends Serializable{
 
-  var levels: Series[(String,String,Boolean),Double] = null
+  val inertia = 0.50
+  var levels: Map[(String,String,Boolean),Double] = null
 
-  def init(init_val: Double, knockouts : Index[(String, String,Boolean)]) : ShiftVertex = {
-    val v = knockouts.map( x => {
-      if (!exp_input.contains(x._1) || exp_input.get(x._1).isNA) {
-        init_val
-      } else {
-        exp_input.get(x._1).get
-      }
-    })
+  def init(init_val: Double, knockouts : Array[(String, String,Boolean)]) : ShiftVertex = {
     val out = new ShiftVertex(name, nodeType, exp_input)
-    out.levels = Series(v.toVec, knockouts)
+    out.levels = knockouts.map( x => {
+      if (!exp_input.contains(x._1) || exp_input.get(x._1).get.isNaN) {
+        (x, init_val)
+      } else {
+        (x, exp_input.get(x._1).get)
+      }
+    }).toMap
     out
   }
 
   def process(messages: List[ShiftMessage], cycle:Int) : ShiftVertex = {
-    val knockouts = messages.foldRight(Index[(String,String,Boolean)]())( (x,y) => x.values.index.union(y).index )
-    println(messages)
+    val knockouts = messages.foldRight(Set[(String,String,Boolean)]())( (x,y) => y ++ x.values.keys.toSet ).toSeq
+
     val results = knockouts.map( exp => {
-      // -a> or -a| edge types
+      // -a> edge types
       val activation_value_pos = Option(Vec( messages.filter( x => x.edgeType == "-a>" ).
-        map( x => x.values.get(exp) ).filter(!_.isNA).map(_.get): _* ).mean)
+        map( x => x.values.get(exp) ).filter( x => x.isDefined && !x.get.isNaN ).map(_.get): _* ).mean)
 
+      // -a| edge types
       val activation_value_neg = Option(Vec( messages.filter( x => x.edgeType == "-a|" ).
-        map( x => x.values.get(exp) ).filter(!_.isNA).map(1.0 - _.get): _* ).mean)
+        map( x => x.values.get(exp) ).filter( x => x.isDefined && !x.get.isNaN ).map(1.0 - _.get): _* ).mean)
 
-      // -t> or -t| edge types
+      // -t> edge types
       val transcription_value_pos = Option(Vec( messages.filter( x => x.edgeType == "-t>").
-        map( x => x.values.get(exp) ).filter(!_.isNA).map(_.get): _*).mean)
+        map( x => x.values.get(exp) ).filter( x => x.isDefined && !x.get.isNaN ).map(_.get): _*).mean)
 
-      // -t> or -t| edge types
+      // -t| edge types
       val transcription_value_neg = Option(Vec( messages.filter( x => x.edgeType == "-t|" ).
-        map( x => x.values.get(exp) ).filter(!_.isNA).map(1.0 - _.get): _*).mean)
+        map( x => x.values.get(exp) ).filter( x => x.isDefined && !x.get.isNaN ).map(1.0 - _.get): _*).mean)
 
       // -component> edge types
       val component_value = Vec( messages.filter( x => x.edgeType == "-component>" ).
         filter(_.downStream).
-        map( x => x.values.get(exp) ).filter(!_.isNA).map(_.get): _*).min
+        map( x => x.values.get(exp) ).filter( x => x.isDefined && !x.get.isNaN).map(_.get): _*).min
 
       // -member> edge types
       val member_value = Vec( messages.filter( x => x.edgeType == "-member>" ).
         filter(_.downStream).
-        map( x => x.values.get(exp) ).filter(!_.isNA).map(_.get):_* ).max
+        map( x => x.values.get(exp) ).filter( x => x.isDefined && !x.get.isNaN).map(_.get):_* ).max
 
       val inputs = Array(activation_value_pos, activation_value_neg,
         transcription_value_pos, transcription_value_neg,
@@ -76,18 +77,22 @@ class ShiftVertex(val name : String,
       //println(name, inputs.mkString(" , "))
       val input_val = Vec(inputs.filter(x => x.isDefined).map(_.get)).mean
 
-      val out_value = if (levels.contains(exp) && !levels.get(exp).isNA) {
-        ( (0.25 * levels.get(exp).get) + (0.75 * input_val))
-      } else {
+      val out_value = if (exp_input.contains(exp._2) && !exp_input.get(exp._2).get.isNaN) { //levels.contains(exp) && !levels.get(exp).get.isNaN) {
+        ( (inertia * exp_input.get(exp._2).get) + ((1.0 - inertia) * input_val))
+      } else if (!input_val.isNaN) {
         input_val
+      } else if (!input_val.isNaN) {
+        input_val
+      } else {
+        0.5
       }
-      out_value
-    }).toVec
+      (exp, out_value)
+    }).toMap
 
     val out = new ShiftVertex(name, nodeType, exp_input)
     //calculate levels here, this involves taking all of the incoming messages, and the original inputs and determining
     //the current levels
-    out.levels = Series(results, knockouts)
+    out.levels = results
     //val fw = new FileWriter("/pod/home/kellrott/data/steps/" + name.replace("/", "_"), true)
     //fw.write("Cycle: " + cycle + "\n")
     //fw.close()
@@ -118,7 +123,7 @@ class ShiftVertex(val name : String,
     up_exp.foreach( x => {
       shift(x._1) = x._2.keys.
         filter( y => (up_exp(x._1).contains(y)) && (down_exp(x._1).contains(y)) ).
-        map( y => (y, up_exp(x._1)(y) - down_exp(x._1)(y)) ).toMap
+        map( y => (y, down_exp(x._1)(y) - up_exp(x._1)(y) )).toMap
     } )
 
 
@@ -152,7 +157,7 @@ class ShiftVertex(val name : String,
 class ShiftMessage(
                     val edgeType: String,
                     val downStream: Boolean,
-                    val values: Series[(String,String,Boolean),Double])
+                    val values: Map[(String,String,Boolean),Double])
   extends Serializable {
   override def toString() : String = {
     "ShiftMessage<%s:%s=%s>".format(edgeType,downStream,values)
@@ -217,44 +222,48 @@ object FauxShift {
     val outdir = File(cmdline.outdir())
     if (!outdir.exists) outdir.createDirectory()
 
-    //open the TSV
-    val exp_file = CsvFile(cmdline.expression())
-    //Parse it (with row index and column index)
-    var input_frame = CsvParser.parse(params = CsvParams(separChar = '\t'))(exp_file).
-      withRowIndex(0).withColIndex(0).
-      mapValues(CsvParser.parseDouble).T
-    //columns are samples
-    //rows are genes
+    var (input_frame, col_index) = DataFrame.load_csv(sc, cmdline.expression(), separator = '\t')
 
     if (cmdline.sample.isDefined) {
       //if we are only looking at a single sample, we can remove all other columns
-      input_frame = input_frame.filterIx(x => cmdline.sample().contains(x))
+      val cmd_sample = cmdline.sample()
+      input_frame = input_frame.filter(x => cmd_sample.contains(x._1))
     }
 
-    input_frame.colIx.toSeq.grouped(cmdline.setsize()).zipWithIndex.foreach( exp_set => {
+    val samples = input_frame.map( _._1 ).collect()
+
+    //move along the samples in groups of size 'setsize'
+    samples.grouped(cmdline.setsize()).zipWithIndex.foreach( exp_set => {
       val (exp_group, exp_num) = exp_set
-      val exp_frame = input_frame.filterIx( x => exp_group.contains(x))
+      val exp_frame = input_frame.filter( x => exp_group.contains(x._1) )
       //true is downstream, false is upstream
       //println(exp_frame.rowIx)
       val experimentSet = if (cmdline.gene.isDefined) {
         //for every sample, define a gene:UPSTREAM and a gene:DOWNSTREAM  experiment
-        Index(exp_frame.toColSeq.
-          flatMap(x => List((x._1, cmdline.gene(), UPSTREAM), (x._1, cmdline.gene(), DOWNSTREAM))).toArray)
+        val cmd_gene = cmdline.gene()
+        exp_frame.flatMap( x => List((x._1, cmd_gene, UPSTREAM), (x._1, cmd_gene, DOWNSTREAM))).collect()
       } else {
-        Index(exp_frame.toColSeq.
-          flatMap(x => x._2.toSeq.map(y => (x._1, y._1, UPSTREAM)) ++ x._2.toSeq.map(y => (x._1, y._1, DOWNSTREAM))).toArray)
+        exp_frame.
+          flatMap(x => x._2.toSeq.map(y => (x._1, y._1, UPSTREAM)) ++ x._2.toSeq.map(y => (x._1, y._1, DOWNSTREAM))).collect()
       }
-      if (!experimentSet.isUnique) {
+
+      if (!Index(experimentSet).isUnique) {
         //make sure that duplicate experiments haven't been defined, this would cause problems later in the message intersection code
         println(experimentSet)
         throw new Exception("Duplicate item in index")
       }
       val experimentSet_br = sc.broadcast(experimentSet)
 
+      val exp_value_frame = exp_frame.flatMap( x => x._2.map( y => (y._1, Map(x._1 -> y._2) ) ).toSeq ).
+        reduceByKey(
+       _ ++ _
+      )
+
+
+
       //parallelize the matrix by the genes (rows) so the data can be attached to the graph
-      val exp_rdd = sc.parallelize(exp_frame.toRowSeq, cmdline.frags())
       //join the columns to the graph vertices by the vertex names
-      val exp_rdd_joined = vertex_rdd.map(x => (x._2.name, x)).join(exp_rdd).map(
+      val exp_rdd_joined = vertex_rdd.map(x => (x._2.name, x)).join(exp_value_frame).map(
         //create new vertex values, which are ShiftVertex structures
         x => (x._2._1._1, new ShiftVertex(x._2._1._2.name, x._2._1._2.nodeType, x._2._2))
       )
@@ -264,7 +273,7 @@ object FauxShift {
         //joint the generated ShiftVertex structures to the graph, if a node isn't matched give it
         //an empty set of input values
         (x, y, z) => {
-          z.getOrElse(new ShiftVertex(y.name, y.nodeType, Series()))
+          z.getOrElse(new ShiftVertex(y.name, y.nodeType, Map()))
         }
       )
 
@@ -279,17 +288,17 @@ object FauxShift {
 
           if (x.srcAttr.levels != null) {
             //downstream messages
-            val downstream = x.srcAttr.levels.filterIx(y => {
-              //either the downstream target isn't part of the knockout experiment, or it isn't a downstream experiment
-              y._2 != x.dstAttr.name || y._3 == UPSTREAM
+            val downstream = x.srcAttr.levels.filter(y => {
+              //either the downstream target isn't part of the knockout experiment, or it isn't a upstream experiment
+              y._1._2 != x.dstAttr.name || y._1._3 == UPSTREAM
             })
             x.sendToDst(List(new ShiftMessage(x.attr.edgeType, DOWNSTREAM, downstream)))
           }
           if (x.dstAttr.levels != null) {
             //upstream messages
-            val upstream = x.dstAttr.levels.filterIx(y => {
+            val upstream = x.dstAttr.levels.filter(y => {
               //either the downstream target isn't part of the knockout experiment, or it isn't a downstream experiment
-              y._2 != x.srcAttr.name || y._3 == DOWNSTREAM
+              y._1._2 != x.srcAttr.name || y._1._3 == DOWNSTREAM
             })
             x.sendToSrc(List(new ShiftMessage(x.attr.edgeType, UPSTREAM, upstream)))
           }
