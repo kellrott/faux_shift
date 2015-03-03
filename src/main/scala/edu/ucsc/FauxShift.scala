@@ -1,13 +1,13 @@
 package edu.ucsc
 
-import java.io.FileWriter
+//import java.io.FileWriter
 
 import com.esotericsoftware.kryo.Kryo
 import org.apache.spark.serializer.KryoRegistrator
 import org.apache.spark.storage.StorageLevel
-import org.saddle.scalar.NA
+//import org.saddle.scalar.NA
 import org.saddle.{Vec, Series, Index}
-import org.saddle.io._
+//import org.saddle.io._
 
 import org.apache.spark.graphx.{VertexRDD, Edge, Graph}
 
@@ -18,8 +18,8 @@ import org.apache.spark.SparkContext
 import org.apache.spark.SparkConf
 import scala.collection.mutable
 import scala.util.parsing.json.{JSONArray, JSONObject}
-
 import scala.reflect.io.File
+import scala.io.Source.fromFile
 
 class ShiftVertex(val name : String,
                   val nodeType : String,
@@ -27,49 +27,48 @@ class ShiftVertex(val name : String,
                    ) extends Serializable{
 
   val inertia = 0.50
-  var levels: Map[(String,String,Boolean),Double] = null
+  var levels: Array[Double] = null
 
   def init(init_val: Double, knockouts : Array[(String, String,Boolean)]) : ShiftVertex = {
     val out = new ShiftVertex(name, nodeType, exp_input)
     out.levels = knockouts.map( x => {
       if (!exp_input.contains(x._1) || exp_input.get(x._1).get.isNaN) {
-        (x, init_val)
+        init_val
       } else {
-        (x, exp_input.get(x._1).get)
+        exp_input.get(x._1).get
       }
-    }).toMap
+    })
     out
   }
 
-  def process(messages: List[ShiftMessage], cycle:Int) : ShiftVertex = {
-    val knockouts = messages.foldRight(Set[(String,String,Boolean)]())( (x,y) => y ++ x.values.keys.toSet ).toSeq
+  def process(messages: List[ShiftMessage], knockouts: Array[(String,String,Boolean)], cycle:Int) : ShiftVertex = {
 
-    val results = knockouts.map( exp => {
+    val results = knockouts.zipWithIndex.map( (exp) => {
       // -a> edge types
       val activation_value_pos = Option(Vec( messages.filter( x => x.edgeType == "-a>" ).
-        map( x => x.values.get(exp) ).filter( x => x.isDefined && !x.get.isNaN ).map(_.get): _* ).mean)
+        map( x => x.values(exp._2) ).filter( x => !x.isNaN ).map(_.get): _* ).mean)
 
       // -a| edge types
       val activation_value_neg = Option(Vec( messages.filter( x => x.edgeType == "-a|" ).
-        map( x => x.values.get(exp) ).filter( x => x.isDefined && !x.get.isNaN ).map(1.0 - _.get): _* ).mean)
+        map( x => x.values(exp._2) ).filter( x => !x.get.isNaN ).map(1.0 - _.get): _* ).mean)
 
       // -t> edge types
       val transcription_value_pos = Option(Vec( messages.filter( x => x.edgeType == "-t>").
-        map( x => x.values.get(exp) ).filter( x => x.isDefined && !x.get.isNaN ).map(_.get): _*).mean)
+        map( x => x.values(exp._2) ).filter( x => !x.get.isNaN ).map(_.get): _*).mean)
 
       // -t| edge types
       val transcription_value_neg = Option(Vec( messages.filter( x => x.edgeType == "-t|" ).
-        map( x => x.values.get(exp) ).filter( x => x.isDefined && !x.get.isNaN ).map(1.0 - _.get): _*).mean)
+        map( x => x.values(exp._2) ).filter( x => !x.get.isNaN ).map(1.0 - _.get): _*).mean)
 
       // -component> edge types
       val component_value = Vec( messages.filter( x => x.edgeType == "-component>" ).
         filter(_.downStream).
-        map( x => x.values.get(exp) ).filter( x => x.isDefined && !x.get.isNaN).map(_.get): _*).min
+        map( x => x.values(exp._2) ).filter( x => !x.get.isNaN).map(_.get): _*).min
 
       // -member> edge types
       val member_value = Vec( messages.filter( x => x.edgeType == "-member>" ).
         filter(_.downStream).
-        map( x => x.values.get(exp) ).filter( x => x.isDefined && !x.get.isNaN).map(_.get):_* ).max
+        map( x => x.values(exp._2) ).filter( x => !x.get.isNaN).map(_.get):_* ).max
 
       val inputs = Array(activation_value_pos, activation_value_neg,
         transcription_value_pos, transcription_value_neg,
@@ -77,17 +76,15 @@ class ShiftVertex(val name : String,
       //println(name, inputs.mkString(" , "))
       val input_val = Vec(inputs.filter(x => x.isDefined).map(_.get)).mean
 
-      val out_value = if (exp_input.contains(exp._2) && !exp_input.get(exp._2).get.isNaN) { //levels.contains(exp) && !levels.get(exp).get.isNaN) {
-        ( (inertia * exp_input.get(exp._2).get) + ((1.0 - inertia) * input_val))
-      } else if (!input_val.isNaN) {
-        input_val
+      val out_value = if (exp_input.contains(exp._1._2) && !exp_input.get(exp._1._2).get.isNaN) { //levels.contains(exp) && !levels.get(exp).get.isNaN) {
+        ( (inertia * exp_input.get(exp._1._2).get) + ((1.0 - inertia) * input_val))
       } else if (!input_val.isNaN) {
         input_val
       } else {
         0.5
       }
-      (exp, out_value)
-    }).toMap
+      out_value
+    })
 
     val out = new ShiftVertex(name, nodeType, exp_input)
     //calculate levels here, this involves taking all of the incoming messages, and the original inputs and determining
@@ -99,23 +96,23 @@ class ShiftVertex(val name : String,
     return out
   }
 
-  def toJSON(): String = {
+  def toJSON(knockouts: Array[(String,String,Boolean)]): String = {
 
     //levels.toSeq.map( x => x._1._1 ).toSet.map( x => levels.toSeq.filter( _._1 == x).map( y => y._) )
     val up_exp = new mutable.HashMap[String,mutable.HashMap[String,Double]]()
     val down_exp = new mutable.HashMap[String,mutable.HashMap[String,Double]]()
 
-    levels.toSeq.foreach( x => {
+    knockouts.zipWithIndex.foreach( x => {
       if (x._1._3) {
         if (!down_exp.contains(x._1._1)) {
           down_exp(x._1._1) = new mutable.HashMap[String,Double]()
         }
-        down_exp(x._1._1)(x._1._2) = x._2
+        down_exp(x._1._1)(x._1._2) = levels(x._2)
       } else {
         if (!up_exp.contains(x._1._1)) {
           up_exp(x._1._1) = new mutable.HashMap[String,Double]()
         }
-        up_exp(x._1._1)(x._1._2) = x._2
+        up_exp(x._1._1)(x._1._2) = levels(x._2)
       }
     })
 
@@ -141,11 +138,13 @@ class ShiftVertex(val name : String,
     val v = new JSONObject(
       Map(
         "gene" -> name,
-        "exp_inputs" -> JSONObject( exp_input.toSeq.toMap ),
+        //"exp_inputs" -> JSONObject( exp_input.toSeq.toMap ),
+        /*
         "experiments" -> JSONObject( Map(
           "downstream" -> JSONObject( down_exp.map( x=> (x._1, JSONObject(x._2.toMap)) ).toMap ),
           "upstream" -> JSONObject( up_exp.map( x => (x._1, JSONObject(x._2.toMap))).toMap ) )
         ),
+        */
         "shift" -> JSONObject( shift.map( x => (x._1, JSONObject(x._2)) ).toMap )
       )
     )
@@ -157,7 +156,7 @@ class ShiftVertex(val name : String,
 class ShiftMessage(
                     val edgeType: String,
                     val downStream: Boolean,
-                    val values: Map[(String,String,Boolean),Double])
+                    val values: Array[Double])
   extends Serializable {
   override def toString() : String = {
     "ShiftMessage<%s:%s=%s>".format(edgeType,downStream,values)
@@ -196,6 +195,7 @@ object FauxShift {
       val cycle_count: scallop.ScallopOption[Int] = opt[Int]("cycles", default = Option(10))
       val frags: scallop.ScallopOption[Int] = opt[Int]("frags", default = Option(20))
       val gene: scallop.ScallopOption[String] = opt[String]("gene")
+      val genelist: scallop.ScallopOption[String] = opt[String]("genelist")
       val outdir: scallop.ScallopOption[String] = opt[String]("outdir")
       val sample: scallop.ScallopOption[List[String]] = opt[List[String]]("sample")
       val setsize: scallop.ScallopOption[Int] = opt[Int]("setsize", default = Option(5))
@@ -208,6 +208,7 @@ object FauxShift {
     sconf.set("spark.serializer", "org.apache.spark.serializer.KryoSerializer")
     sconf.set("spark.kryo.registrator", "edu.ucsc.ShiftRegistrator")
     sconf.set("spark.akka.frameSize", "50")
+    //sconf.set("spark.logConf", "false")
     if (cmdline.maxcores.isDefined) {
       sconf.set("spark.cores.max", cmdline.maxcores().toString )
       sconf.set("spark.mesos.coarse", "true")
@@ -238,14 +239,21 @@ object FauxShift {
       val exp_frame = input_frame.filter( x => exp_group.contains(x._1) )
       //true is downstream, false is upstream
       //println(exp_frame.rowIx)
-      val experimentSet = if (cmdline.gene.isDefined) {
-        //for every sample, define a gene:UPSTREAM and a gene:DOWNSTREAM  experiment
-        val cmd_gene = cmdline.gene()
-        exp_frame.flatMap( x => List((x._1, cmd_gene, UPSTREAM), (x._1, cmd_gene, DOWNSTREAM))).collect()
+
+      val gene_list : Array[String] = if (cmdline.gene.isDefined) {
+        Array(cmdline.gene())
+      } else if (cmdline.genelist.isDefined) {
+        fromFile(cmdline.genelist()).getLines().toArray.intersect( col_index.toSeq )
       } else {
-        exp_frame.
-          flatMap(x => x._2.toSeq.map(y => (x._1, y._1, UPSTREAM)) ++ x._2.toSeq.map(y => (x._1, y._1, DOWNSTREAM))).collect()
+        vertices.map( _._2.name ).intersect( col_index.toSeq )
       }
+
+      println("Experiment Genes " + gene_list.mkString(","))
+
+      //throw new Exception("testing")
+
+      val experimentSet = exp_frame.
+        flatMap(x => gene_list.map(y => (x._1, y, UPSTREAM)) ++ gene_list.map(y => (x._1, y, DOWNSTREAM))).collect()
 
       if (!Index(experimentSet).isUnique) {
         //make sure that duplicate experiments haven't been defined, this would cause problems later in the message intersection code
@@ -258,7 +266,6 @@ object FauxShift {
         reduceByKey(
        _ ++ _
       )
-
 
 
       //parallelize the matrix by the genes (rows) so the data can be attached to the graph
@@ -281,6 +288,7 @@ object FauxShift {
       var oldGraph : Graph[ShiftVertex, SPFEdge ] = null
       curGraph = curGraph.mapVertices((x, y) => y.init(0.5, experimentSet_br.value))
       for (i <- 0 to cmdline.cycle_count()) {
+        val experimentSet_br_local = experimentSet_br
         val curMessages = curGraph.aggregateMessages[List[ShiftMessage]](x => {
           //The edge passing rules go here
           //do a cycle over the different 'experiments'. Each experiment is different
@@ -288,17 +296,25 @@ object FauxShift {
 
           if (x.srcAttr.levels != null) {
             //downstream messages
-            val downstream = x.srcAttr.levels.filter(y => {
+            val downstream = experimentSet_br_local.value.zipWithIndex.map( y => {
               //either the downstream target isn't part of the knockout experiment, or it isn't a upstream experiment
-              y._1._2 != x.dstAttr.name || y._1._3 == UPSTREAM
+              if (y._1._2 != x.dstAttr.name || y._1._3 == UPSTREAM) {
+                x.srcAttr.levels(y._2)
+              } else {
+                Double.NaN
+              }
             })
             x.sendToDst(List(new ShiftMessage(x.attr.edgeType, DOWNSTREAM, downstream)))
           }
           if (x.dstAttr.levels != null) {
             //upstream messages
-            val upstream = x.dstAttr.levels.filter(y => {
+            val upstream = experimentSet_br_local.value.zipWithIndex.map( y => {
               //either the downstream target isn't part of the knockout experiment, or it isn't a downstream experiment
-              y._1._2 != x.srcAttr.name || y._1._3 == DOWNSTREAM
+              if (y._1._2 != x.srcAttr.name || y._1._3 == DOWNSTREAM) {
+                x.dstAttr.levels(y._2)
+              } else {
+                Double.NaN
+              }
             })
             x.sendToSrc(List(new ShiftMessage(x.attr.edgeType, UPSTREAM, upstream)))
           }
@@ -308,34 +324,34 @@ object FauxShift {
             out
           }
         ).cache()
-        //val fw = new FileWriter("/pod/home/kellrott/data/steps/graph", true)
-        //fw.write("MESSAGE COUNT:" + curMessages.count() + "\t" + i + "\n")
-        //fw.close()
+        curMessages.count()
 
         val ti = i
-        oldGraph = curGraph
-        curGraph = curGraph.outerJoinVertices(curMessages)(
+        val nextGraph = curGraph.outerJoinVertices(curMessages)(
           (vid, vertex, message) => (vertex, message.getOrElse(List[ShiftMessage]()))
-        ).mapVertices( (x,y) => y._1.process( y._2, ti ) ).cache()
-        curGraph.vertices.count()
-        curGraph.edges.count()
-        oldGraph.unpersistVertices(blocking = false)
-        oldGraph.edges.unpersist(blocking = false)
+        ).mapVertices( (x,y) => y._1.process( y._2, experimentSet_br_local.value, ti ) ).cache()
+        //curGraph.vertices.count()
+        //curGraph.edges.count()
+        if (oldGraph != null) {
+          oldGraph.unpersistVertices(blocking = false)
+          oldGraph.edges.unpersist(blocking = false)
+        }
         if (oldMessages != null ) {
           oldMessages.unpersist(blocking=false)
         }
-        oldGraph = curGraph
         oldMessages = curMessages
+        oldGraph = curGraph
+        curGraph = nextGraph
 
         if (cmdline.checkpoint.isDefined && i % cmdline.checkpoint() == 0) {
           curGraph.vertices.
-            map(x => x._2.toJSON()).
+            map(x => x._2.toJSON(experimentSet_br_local.value)).
             saveAsTextFile((outdir / ("set." + exp_num + ".cycle." + i + ".dump")).toString())
         }
       }
       //save the results
       curGraph.vertices.
-        map(x => x._2.toJSON()).
+        map(x => x._2.toJSON(experimentSet_br.value)).
         saveAsTextFile((outdir / ("set." + exp_num + ".final.dump")).toString())
       //unpersist all elements before the next cycle
       experimentSet_br.unpersist(blocking=true)
