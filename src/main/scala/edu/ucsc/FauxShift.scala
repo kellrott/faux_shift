@@ -1,13 +1,8 @@
 package edu.ucsc
 
-//import java.io.FileWriter
-
 import com.esotericsoftware.kryo.Kryo
 import org.apache.spark.serializer.KryoRegistrator
-import org.apache.spark.storage.StorageLevel
-//import org.saddle.scalar.NA
 import org.saddle.{Vec, Series, Index}
-//import org.saddle.io._
 
 import org.apache.spark.graphx.{VertexRDD, Edge, Graph}
 
@@ -26,7 +21,6 @@ class ShiftVertex(val name : String,
                   val exp_input: Map[String,Double]
                    ) extends Serializable{
 
-  val inertia = 0.50
   var levels: Array[Double] = null
 
   def init(init_val: Double, knockouts : Array[(String, String,Boolean)]) : ShiftVertex = {
@@ -41,7 +35,7 @@ class ShiftVertex(val name : String,
     out
   }
 
-  def process(messages: List[ShiftMessage], knockouts: Array[(String,String,Boolean)], cycle:Int) : ShiftVertex = {
+  def process(messages: List[ShiftMessage], knockouts: Array[(String,String,Boolean)], inertia:Double) : ShiftVertex = {
 
     val results = knockouts.zipWithIndex.map( (exp) => {
       // -a> edge types
@@ -76,7 +70,7 @@ class ShiftVertex(val name : String,
       //println(name, inputs.mkString(" , "))
       val input_val = Vec(inputs.filter(x => x.isDefined).map(_.get)).mean
 
-      val out_value = if (exp_input.contains(exp._1._2) && !exp_input.get(exp._1._2).get.isNaN) { //levels.contains(exp) && !levels.get(exp).get.isNaN) {
+      val out_value = if (exp_input.contains(exp._1._2) && !exp_input.get(exp._1._2).get.isNaN) {
         ( (inertia * exp_input.get(exp._1._2).get) + ((1.0 - inertia) * input_val))
       } else if (!input_val.isNaN) {
         input_val
@@ -87,18 +81,11 @@ class ShiftVertex(val name : String,
     })
 
     val out = new ShiftVertex(name, nodeType, exp_input)
-    //calculate levels here, this involves taking all of the incoming messages, and the original inputs and determining
-    //the current levels
     out.levels = results
-    //val fw = new FileWriter("/pod/home/kellrott/data/steps/" + name.replace("/", "_"), true)
-    //fw.write("Cycle: " + cycle + "\n")
-    //fw.close()
     return out
   }
 
-  def toJSON(knockouts: Array[(String,String,Boolean)]): String = {
-
-    //levels.toSeq.map( x => x._1._1 ).toSet.map( x => levels.toSeq.filter( _._1 == x).map( y => y._) )
+  def toJSON(knockouts: Array[(String,String,Boolean)], fullOutput:Boolean=false): String = {
     val up_exp = new mutable.HashMap[String,mutable.HashMap[String,Double]]()
     val down_exp = new mutable.HashMap[String,mutable.HashMap[String,Double]]()
 
@@ -123,31 +110,26 @@ class ShiftVertex(val name : String,
         map( y => (y, down_exp(x._1)(y) - up_exp(x._1)(y) )).toMap
     } )
 
-
-    /*
-    val exp = levels.toSeq.map( x => JSONObject(
-      Map(
-        "sample" -> x._1._1,
-        "gene_test" -> x._1._2,
-        "downstream" -> x._1._3,
-        "value" -> x._2
-      ))
-    ).toList
-    */
-
-    val v = new JSONObject(
-      Map(
-        "gene" -> name,
-        //"exp_inputs" -> JSONObject( exp_input.toSeq.toMap ),
-        /*
-        "experiments" -> JSONObject( Map(
-          "downstream" -> JSONObject( down_exp.map( x=> (x._1, JSONObject(x._2.toMap)) ).toMap ),
-          "upstream" -> JSONObject( up_exp.map( x => (x._1, JSONObject(x._2.toMap))).toMap ) )
-        ),
-        */
-        "shift" -> JSONObject( shift.map( x => (x._1, JSONObject(x._2)) ).toMap )
+    val v = if (fullOutput) {
+      new JSONObject(
+        Map(
+          "gene" -> name,
+          "exp_inputs" -> JSONObject(exp_input.toSeq.toMap),
+          "experiments" -> JSONObject(Map(
+            "downstream" -> JSONObject(down_exp.map(x => (x._1, JSONObject(x._2.toMap))).toMap),
+            "upstream" -> JSONObject(up_exp.map(x => (x._1, JSONObject(x._2.toMap))).toMap))
+          ),
+          "shift" -> JSONObject(shift.map(x => (x._1, JSONObject(x._2))).toMap)
+        )
       )
-    )
+    } else {
+      new JSONObject(
+        Map(
+          "gene" -> name,
+          "shift" -> JSONObject( shift.map(x => (x._1, JSONObject( Map(name -> x._2.getOrElse(name, Double.NaN))))).toMap )
+        )
+      )
+    }
     v.toString()
   }
 
@@ -193,6 +175,7 @@ object FauxShift {
       val mutations: scallop.ScallopOption[String] = opt[String]("mut")
       val expression: scallop.ScallopOption[String] = opt[String]("exp")
       val cycle_count: scallop.ScallopOption[Int] = opt[Int]("cycles", default = Option(10))
+      val intertia: scallop.ScallopOption[Double] = opt[Double]("intertia", default = Option(0.5))
       val frags: scallop.ScallopOption[Int] = opt[Int]("frags", default = Option(20))
       val gene: scallop.ScallopOption[String] = opt[String]("gene")
       val genelist: scallop.ScallopOption[String] = opt[String]("genelist")
@@ -326,10 +309,10 @@ object FauxShift {
         ).cache()
         curMessages.count()
 
-        val ti = i
+        val l_inertia = cmdline.intertia()
         val nextGraph = curGraph.outerJoinVertices(curMessages)(
           (vid, vertex, message) => (vertex, message.getOrElse(List[ShiftMessage]()))
-        ).mapVertices( (x,y) => y._1.process( y._2, experimentSet_br_local.value, ti ) ).cache()
+        ).mapVertices( (x,y) => y._1.process( y._2, experimentSet_br_local.value, l_inertia ) ).cache()
         //curGraph.vertices.count()
         //curGraph.edges.count()
         if (oldGraph != null) {
