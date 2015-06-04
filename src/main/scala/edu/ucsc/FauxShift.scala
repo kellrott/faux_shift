@@ -35,7 +35,7 @@ class ShiftVertex(val name : String,
     out
   }
 
-  def process(messages: List[ShiftMessage], knockouts: Array[(String,String,Boolean)], inertia:Double) : ShiftVertex = {
+  def process(messages: List[ShiftMessage], knockouts: Array[(String,String,Boolean)], gravity:Double, inertia:Double) : ShiftVertex = {
 
     val results = knockouts.zipWithIndex.map( (exp) => {
       // -a> edge types
@@ -70,13 +70,15 @@ class ShiftVertex(val name : String,
       //println(name, inputs.mkString(" , "))
       val input_val = Vec(inputs.filter(x => x.isDefined).map(_.get)).mean
 
-      val out_value = if (exp_input.contains(exp._1._2) && !exp_input.get(exp._1._2).get.isNaN) {
-        ( (inertia * exp_input.get(exp._1._2).get) + ((1.0 - inertia) * input_val))
+      val new_value = if (exp_input.contains(exp._1._2) && !exp_input.get(exp._1._2).get.isNaN) {
+        ( (gravity * exp_input.get(exp._1._2).get) + ((1.0 - gravity) * input_val))
       } else if (!input_val.isNaN) {
         input_val
       } else {
         0.5
       }
+      val old_value = this.levels(exp._2)
+      val out_value = (inertia * old_value) + ((1.0 - inertia) * new_value)
       out_value
     })
 
@@ -175,7 +177,8 @@ object FauxShift {
       val mutations: scallop.ScallopOption[String] = opt[String]("mut")
       val expression: scallop.ScallopOption[String] = opt[String]("exp")
       val cycle_count: scallop.ScallopOption[Int] = opt[Int]("cycles", default = Option(10))
-      val intertia: scallop.ScallopOption[Double] = opt[Double]("intertia", default = Option(0.5))
+      val intertia: scallop.ScallopOption[Double] = opt[Double]("inertia", default = Option(0.5))
+      val gravity: scallop.ScallopOption[Double] = opt[Double]("gravity", default = Option(0.5))
       val frags: scallop.ScallopOption[Int] = opt[Int]("frags", default = Option(20))
       val gene: scallop.ScallopOption[String] = opt[String]("gene")
       val genelist: scallop.ScallopOption[String] = opt[String]("genelist")
@@ -309,10 +312,14 @@ object FauxShift {
         ).cache()
         curMessages.count()
 
-        val l_inertia = cmdline.intertia()
+        val l_inertia = if (i == 0)
+          0.0
+        else
+          cmdline.intertia()
+        val l_gravity = cmdline.gravity()
         val nextGraph = curGraph.outerJoinVertices(curMessages)(
           (vid, vertex, message) => (vertex, message.getOrElse(List[ShiftMessage]()))
-        ).mapVertices( (x,y) => y._1.process( y._2, experimentSet_br_local.value, l_inertia ) ).cache()
+        ).mapVertices( (x,y) => y._1.process( y._2, experimentSet_br_local.value, inertia=l_inertia, gravity=l_gravity ) ).cache()
         //curGraph.vertices.count()
         //curGraph.edges.count()
         if (oldGraph != null) {
