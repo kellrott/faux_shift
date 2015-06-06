@@ -194,6 +194,7 @@ object FauxShift {
     sconf.set("spark.serializer", "org.apache.spark.serializer.KryoSerializer")
     sconf.set("spark.kryo.registrator", "edu.ucsc.ShiftRegistrator")
     sconf.set("spark.akka.frameSize", "50")
+    sconf.set("spark.executor.memory", "90g")
     //sconf.set("spark.logConf", "false")
     if (cmdline.maxcores.isDefined) {
       sconf.set("spark.cores.max", cmdline.maxcores().toString )
