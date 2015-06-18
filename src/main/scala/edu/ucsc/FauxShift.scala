@@ -27,7 +27,7 @@ class ShiftVertex(val name : String,
     val out = new ShiftVertex(name, nodeType, exp_input)
     out.levels = knockouts.map( x => {
       if (!exp_input.contains(x._1) || exp_input.get(x._1).get.isNaN) {
-        init_val
+        Double.NaN //init_val
       } else {
         exp_input.get(x._1).get
       }
@@ -75,10 +75,14 @@ class ShiftVertex(val name : String,
       } else if (!input_val.isNaN) {
         input_val
       } else {
-        0.5
+        Double.NaN //0.5
       }
       val old_value = this.levels(exp._2)
-      val out_value = (inertia * old_value) + ((1.0 - inertia) * new_value)
+      val out_value = if (new_value.isNaN) {
+        old_value
+      } else {
+        (inertia * old_value) + ((1.0 - inertia) * new_value)
+      }
       out_value
     })
 
@@ -194,8 +198,14 @@ object FauxShift {
     sconf.set("spark.serializer", "org.apache.spark.serializer.KryoSerializer")
     sconf.set("spark.kryo.registrator", "edu.ucsc.ShiftRegistrator")
     sconf.set("spark.akka.frameSize", "50")
-    sconf.set("spark.executor.memory", "90g")
-    //sconf.set("spark.logConf", "false")
+    /*
+    if (System.getProperty("spark.executor.memory") != null) {
+      println("Setting executor memory ", System.getProperty("spark.executor.memory"))
+      sconf.set("spark.executor.memory", System.getProperty("spark.executor.memory"))
+    }
+    */
+    sconf.set("spark.executor.memory", "20G")
+      //sconf.set("spark.logConf", "false")
     if (cmdline.maxcores.isDefined) {
       sconf.set("spark.cores.max", cmdline.maxcores().toString )
       sconf.set("spark.mesos.coarse", "true")
